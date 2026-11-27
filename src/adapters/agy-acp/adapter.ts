@@ -39,6 +39,8 @@ import { agyAcpPolicyRefusal } from "./policy";
 export const AGY_ACP_IDENTITY_URL = "https://antigravity.google/docs/cli/acp";
 export const AGY_ACP_ARGS = ["acp", "--sandbox"] as const;
 
+const SUMMARIZE_AFTER_DENIAL = "The tool permission was denied. Leave that operation unexecuted. Give the user your final answer now from the existing conversation and completed tool results, in their language. Use no tools. Explain any missing evidence.";
+
 const TURN_TIMEOUT_MS = 10 * 60 * 1000;
 const VERSION_TIMEOUT_MS = 10_000;
 const KILL_GRACE_MS = 2_000;
@@ -278,6 +280,9 @@ export function createAgyAcpAdapter(provider: OcxProviderConfig, deps: AgyAcpDep
     const { stdin, stdout, stderr } = child;
     let modelSetterPending = false;
     let prompting = false;
+    let deniedPermission = false;
+    let finalizing = false;
+    let hasAnswer = false;
     let usage: OcxUsage | undefined;
     let pendingTool: ReturnType<typeof tools.capture>;
     let cancelledCapturedPermission = false;
@@ -389,12 +394,24 @@ export function createAgyAcpAdapter(provider: OcxProviderConfig, deps: AgyAcpDep
       return false;
     }
 
+    function finishPermissionDenial(): void {
+      finish({
+        type: "error", code: "agy_acp_permission_denied", errorType: "permission_error", status: 403,
+        retryable: false, usage,
+        message: "Antigravity needed a tool permission that was declined and did not finish its answer. Continue from the tool results already in the conversation.",
+      });
+    }
+
     function sendPrompt(): void {
       if (settled) return;
       if (!checkSelectedModel() || !checkSelectedThinking()) return;
-      const refuse = (error: unknown): void => finish(undefined, false, { error });
+      const refuse = (error: unknown): void => {
+        if (finalizing && error instanceof SendBudgetExhaustedError) return finishPermissionDenial();
+        finish(undefined, false, { error });
+      };
       try {
-        const prompt = acpPromptBlocks(parsed, !systemOnSession, systemOnSession ? undefined : tools.instruction);
+        const prompt = finalizing ? [{ type: "text" as const, text: SUMMARIZE_AFTER_DENIAL }]
+          : acpPromptBlocks(parsed, !systemOnSession, systemOnSession ? undefined : tools.instruction);
         if (!allowsImage && prompt.some(block => block.type === "image")) {
           return finish(invalidRequest("unsupported_input_modality", "This ACP session did not advertise image input."));
         }
@@ -412,7 +429,7 @@ export function createAgyAcpAdapter(provider: OcxProviderConfig, deps: AgyAcpDep
             incoming.beforePhysicalSend?.();
             if (permit && !permit.use()) return refuse(new SendBudgetExhaustedError());
             prompting = true;
-            incoming.onPhysicalSend?.({ ordinal: 1 });
+            incoming.onPhysicalSend?.(finalizing ? { ordinal: 2, recovery: "empty-completion" } : { ordinal: 1 });
             request("prompt", id => sessionPromptFrame(id, sessionId!, prompt));
           } catch (error) {
             refuse(error);
@@ -474,7 +491,11 @@ export function createAgyAcpAdapter(provider: OcxProviderConfig, deps: AgyAcpDep
         return sendPrompt();
       }
       // prompt
-      usage = mapAcpUsage(r.usage) ?? usage;
+      const reported = mapAcpUsage(r.usage);
+      if (reported) usage = {
+        inputTokens: (usage?.inputTokens ?? 0) + reported.inputTokens,
+        outputTokens: (usage?.outputTokens ?? 0) + reported.outputTokens,
+      };
       const terminal = acpTerminal(r.stopReason, incoming.abortSignal?.aborted === true);
       if (terminal.kind === "aborted") return finish(undefined, true);
       if (terminal.kind === "error") {
@@ -484,6 +505,12 @@ export function createAgyAcpAdapter(provider: OcxProviderConfig, deps: AgyAcpDep
       }
       if (terminal.kind === "refusal") return finish({ type: "incomplete", reason: "content_filter", retryable: false, usage });
       if (pendingTool) return; // The captured call settles after this batch of frames.
+      if (deniedPermission && !hasAnswer) {
+        const hasToolResults = parsed.context.messages.some(message => message.role === "toolResult" && !message.isError);
+        if (finalizing || r.stopReason !== "end_turn" || tools.required || !hasToolResults) return finishPermissionDenial();
+        finalizing = true;
+        return sendPrompt();
+      }
       if (tools.required) return fail("agy_acp_protocol", "required client tool was not called");
       finish({ type: "done", ...(usage ? { usage } : {}), ...(terminal.stopReason ? { stopReason: terminal.stopReason } : {}) });
     }
@@ -509,7 +536,8 @@ export function createAgyAcpAdapter(provider: OcxProviderConfig, deps: AgyAcpDep
         const params = frame.params as { sessionId?: unknown; toolCall?: unknown } | undefined;
         send(frame.method === "session/request_permission" ? permissionCancelledFrame(frame.id) : methodNotFoundFrame(frame.id));
         if (frame.method === "session/request_permission" && sessionId && params?.sessionId === sessionId) {
-          captureClientCall(params.toolCall, true);
+          if (finalizing) return finishPermissionDenial();
+          if (prompting && !captureClientCall(params.toolCall, true)) deniedPermission = true;
         }
         return;
       }
@@ -531,13 +559,16 @@ export function createAgyAcpAdapter(provider: OcxProviderConfig, deps: AgyAcpDep
         return;
       }
       if (!prompting) return;
-      if ((update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update")
-        && captureClientCall(update)) return;
+      if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
+        if (finalizing) return finishPermissionDenial();
+        if (captureClientCall(update)) return;
+      }
       for (const event of acpUpdateToEvents(update)) {
         if (event.type !== "text_delta" && event.type !== "thinking_delta") {
           emit(event);
           continue;
         }
+        if (event.type === "text_delta" && event.text.trim()) hasAnswer = true;
         if (!output.push(event.type, event.type === "text_delta" ? event.text : event.thinking)) emit({ type: "heartbeat" });
       }
     }

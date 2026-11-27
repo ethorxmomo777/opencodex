@@ -1059,6 +1059,47 @@ describe("agy acp turn", () => {
       { jsonrpc: "2.0", id: 9, error: { code: -32601, message: "Method not found" } },
     ]);
     expect(JSON.stringify(h.events)).not.toContain(SENTINEL);
+    expect(errorCode(h)).toBe("agy_acp_permission_denied");
+  });
+
+  test.each(["answer", "empty", "tool", "budget"] as const)("a denied native call can finish from prior results once: %s", async outcome => {
+    const request = parsed();
+    request.context.messages.push({ role: "toolResult", toolCallId: "one", toolName: "example", content: "result-one", isError: false, timestamp: 0 });
+    const ordinals: number[] = [];
+    let prompts = 0;
+    const h = await run(script((frame, api) => {
+      if (frame.method !== "session/prompt") return;
+      prompts++;
+      if (prompts === 1) {
+        api.request("native", "session/request_permission", { sessionId: "s1", toolCall: { title: SENTINEL } });
+        api.notify({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "thinking" } });
+      } else {
+        expect(frame.params.sessionId).toBe("s1");
+        expect(frame.params.prompt).toHaveLength(1);
+        expect(frame.params.prompt[0].text).toContain("Use no tools");
+        expect(frame.params.prompt[0].text).not.toContain(SENTINEL);
+        if (outcome === "answer") api.notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "final answer" } });
+        if (outcome === "tool") api.notify({ sessionUpdate: "tool_call", toolCallId: "new", name: "example", status: "pending" });
+      }
+      api.reply(frame.id, { stopReason: "end_turn", usage: { inputTokens: 5, outputTokens: 2 } });
+      return true;
+    }), { parsed: request, sendAccounting: {
+      sendBudget: createRequestExecutionBudget({
+        maxTotalModelSends: outcome === "budget" ? 1 : 2, baseSendAllowance: 2,
+        finalRecoveryAllowance: 0, maxAlternateTargetSends: 0, maxTargetTransitions: 0,
+      }),
+      onPhysicalSend: send => { ordinals.push(send.ordinal); },
+    } });
+    expect(ordinals).toEqual(outcome === "budget" ? [1] : [1, 2]);
+    expect(prompts).toBe(ordinals.length);
+    expect(h.sent.find(f => f.id === "native")?.result.outcome).toEqual({ outcome: "cancelled" });
+    expect(h.events.some(event => event.type === "tool_call_start")).toBe(false);
+    if (outcome === "answer") {
+      expect(terminal(h)).toMatchObject([{ type: "done", usage: { inputTokens: 10, outputTokens: 4 } }]);
+      expect(h.events).toContainEqual({ type: "text_delta", text: "final answer" });
+    } else {
+      expect(terminal(h)).toMatchObject([{ type: "error", code: "agy_acp_permission_denied", retryable: false }]);
+    }
   });
 
   test("child-authored text never reaches an error: stderr, error messages and early exit", async () => {
@@ -1202,7 +1243,7 @@ describe("host tools and multimodal replay", () => {
       expect(result.sent.find(frame => frame.id === id)?.result.outcome.outcome).toBe("cancelled");
     }
     expect(result.events.some(event => event.type === "tool_call_start")).toBe(false);
-    expect(terminal(result)).toMatchObject([{ type: "done" }]);
+    expect(errorCode(result)).toBe("agy_acp_permission_denied");
   });
 
   test("discards a captured call when the model changes in the same stdout batch", async () => {
