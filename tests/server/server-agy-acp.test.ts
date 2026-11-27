@@ -150,6 +150,32 @@ describe.skipIf(process.platform === "win32")("antigravity-acp through the serve
     }
   });
 
+  test.each([false, true])("a denied native operation finishes the existing investigation (empty summary: %s)", async empty => {
+    saveConfig(config());
+    const server = startServer(0);
+    try {
+      const res = await fetch(new URL("/v1/responses", server.url), {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...responsesBody, input: [
+          ...responsesBody.input,
+          { type: "function_call", name: "lookup", call_id: "lookup1", arguments: "{}" },
+          { type: "function_call_output", call_id: "lookup1", output: "fixture denied command" + (empty ? " fixture empty summary" : "") },
+        ] }),
+      });
+      const events = (await res.text()).split("\n").filter(line => line.startsWith("data: {"))
+        .map(line => JSON.parse(line.slice(6)));
+      if (empty) {
+        expect(events.some(e => e.type === "response.failed" && e.response.error.code === "agy_acp_permission_denied")).toBe(true);
+        expect(events.some(e => e.type === "response.completed")).toBe(false);
+      } else {
+        expect(events.some(e => e.type === "response.output_text.delta" && e.delta === "Summary from the existing result.")).toBe(true);
+        expect(events.some(e => e.type === "response.completed")).toBe(true);
+      }
+    } finally {
+      await server.stop(true);
+    }
+  });
+
   test("an interactive turn publishes one attempt for its one guarded prompt send", async () => {
     saveConfig(config());
     const server = startServer(0);

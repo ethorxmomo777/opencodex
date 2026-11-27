@@ -172,7 +172,7 @@ export function buildAcpPrompt(parsed: OcxParsedRequest, includeSystem: boolean,
 
   // Keep the decision, approved scope, paired call and outcome in order under pressure.
   // Reserve space for both ends of each anchor (a command result often ends with its exit status).
-  const header = "[truncated]\n";
+  const header = "[truncated]\nEarlier conversation history was shortened to fit. Continue from the user request and tool results below. Do not look up conversation logs to reconstruct omitted text.\n";
   let remaining = MAX_ACP_PROMPT_CHARS - header.length;
   const count = Math.max(1, blocks.filter(b => b.priority).length);
   const allowance = Math.floor(remaining / count) - 2;

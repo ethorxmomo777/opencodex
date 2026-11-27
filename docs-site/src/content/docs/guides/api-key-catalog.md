@@ -911,7 +911,7 @@ In an interactive Codex chat, Gemini can request tools advertised by that chat, 
 - **Gemini models only:** the static roster is `gemini-3.8-flash`, `gemini-4-argon` and `gemini-3.7-flash`. At each
   turn the model must also be a Gemini model the CLI offers, confirmed before the prompt is sent; anything else is
   refused. Codex reasoning effort selects the CLI's thinking level (`xhigh` selects Extra). OpenCodex masks
-  recognized credentials in answer and reasoning text from the CLI.
+  recognized credentials in answer and reasoning text from the CLI. If a declined CLI operation leaves an investigation without an answer, OpenCodex asks once for a summary using the tool results already available. If it cannot finish, the chat reports `agy_acp_permission_denied`.
 - **Workspace and permissions:** each turn runs in a new empty private directory outside the OpenCodex home. The CLI's
   permission engine asks before every command and before file access outside that directory, and OpenCodex refuses
   every such request. `--sandbox` asks the CLI to run its terminal commands in its OS sandbox; Google documents that it

@@ -19,6 +19,8 @@ let config = [{ id: "model", name: "Model", category: "model", type: "select", c
 ] }];
 const write = (frame: unknown) => process.stdout.write(JSON.stringify(frame) + "\n");
 let buffer = "";
+let deniedPrompt: number | undefined;
+let leaveSummaryEmpty = false;
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk: string) => {
   buffer += chunk;
@@ -26,6 +28,10 @@ process.stdin.on("data", (chunk: string) => {
   while ((index = buffer.indexOf("\n")) >= 0) {
     const frame = JSON.parse(buffer.slice(0, index));
     buffer = buffer.slice(index + 1);
+    if (frame.id === "denied-command" && frame.result?.outcome?.outcome === "cancelled") {
+      write({ jsonrpc: "2.0", id: deniedPrompt, result: { stopReason: "end_turn", usage: { inputTokens: 6, outputTokens: 3 } } });
+      continue;
+    }
     if (frame.method === "initialize") write({ jsonrpc: "2.0", id: frame.id, result: { protocolVersion: 1, agentCapabilities: {} } });
     else if (frame.method === "session/new") write({ jsonrpc: "2.0", id: frame.id, result: { sessionId: "fake-1", configOptions: config } });
     else if (frame.method === "session/set_config_option") {
@@ -35,6 +41,19 @@ process.stdin.on("data", (chunk: string) => {
       const update = (sessionUpdate: string, text: string) =>
         write({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "fake-1", update: { sessionUpdate, content: { type: "text", text } } } });
       const prompt = frame.params.prompt[0].text;
+      if (prompt.includes("fixture denied command")) {
+        deniedPrompt = frame.id;
+        leaveSummaryEmpty = prompt.includes("fixture empty summary");
+        update("agent_thought_chunk", "checking");
+        write({ jsonrpc: "2.0", id: "denied-command", method: "session/request_permission",
+          params: { sessionId: "fake-1", toolCall: { name: "run_command", toolCallId: "native" } } });
+        continue;
+      }
+      if (deniedPrompt !== undefined) {
+        if (!leaveSummaryEmpty) update("agent_message_chunk", "Summary from the existing result.");
+        write({ jsonrpc: "2.0", id: frame.id, result: { stopReason: "end_turn", usage: { inputTokens: 4, outputTokens: 2 } } });
+        continue;
+      }
       if (prompt.includes("fixture refusal")) {
         write({ jsonrpc: "2.0", id: frame.id, result: { stopReason: "refusal", usage: { inputTokens: 7, outputTokens: 2 } } });
         continue;

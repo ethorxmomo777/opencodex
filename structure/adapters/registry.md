@@ -102,6 +102,9 @@ The shared `src/adapters/coding-agent/turn.ts` calls the synchronous `IncomingMe
   matching call to the host after child cleanup; the host executes it under its own tool permissions.
   Inline user and tool-result images require ACP image capability. Text replay under pressure keeps
   the latest request, preceding proposal and paired tool result within the prompt limit.
+  When a denied native permission leaves a turn without answer text, previous successful tool results
+  can be summarized once in the same session. The summary uses the original deadline and send budget.
+  A tool call during the summary, an exhausted budget or an empty summary surfaces `agy_acp_permission_denied`.
   Selection errors use fixed text. Answer and reasoning
   deltas each pass through a bounded streaming redactor for minted OpenCodex credentials, Bearer values,
   OAuth token fields, and token-shaped JWT and API-key strings. Long values stay masked across frames.
